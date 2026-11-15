@@ -29,13 +29,14 @@ Purchase at the pump
   -> TD MySpend push notification on iPhone
   -> iOS Shortcuts automation ("When I get a notification")
   -> HTTPS POST to the Tailscale Funnel URL (works on cellular, away from home)
-  -> ingest service on the ZimaBlade stores a provisional transaction
+  -> ingest service on the ZimaBlade stores the raw request in an inbox
+  -> a separate worker parses it into a provisional transaction
   -> next CSV import confirms it with the posted amount
 ```
 
 Why this shape:
 
-- The phone does not need a VPN. Shortcuts cannot toggle VPN settings, so a private-only setup would silently fail whenever the VPN was off.
+- **The phone does not run Tailscale.** The iPhone only needs normal cellular data. The trade-off is that the ingest endpoint is public, which is why the [authentication and hardening plan](#authentication-and-hardening-plan) below matters.
 - The CSV is the backstop. If the server is off or the phone has no signal, the CSV import still records the purchase.
 - Pay-at-pump pre-authorizations can differ from the final charge, so the CSV row wins when the two are reconciled.
 
@@ -44,26 +45,74 @@ Why this shape:
 - **Wallet "Transaction" trigger** (Shortcuts): fires on Apple Pay tap-to-pay and passes merchant and amount directly. Only works if the card is in Apple Wallet and you pay with it. It feeds the same `/ingest` endpoint.
 - **CSV-only**: the tracker is fully usable without any real-time capture.
 
+### Considered and not chosen: Tailscale on the phone
+
+Installing Tailscale on the iPhone would remove the public endpoint entirely (only your own devices could reach the service). Tailscale's iOS app has VPN On Demand, which addresses most of the "VPN might be off" concern. It was not chosen because the phone app will not be installed. Possible downsides of that route are a race between the tunnel coming up and the first request, battery or connectivity quirks, and only one On Demand VPN app being allowed at a time.
+
+The ingest service should be written so it can be moved behind a tailnet-only address later without code changes (only `PUBLIC_BASE_URL` and the Funnel setting change).
+
 ## Architecture
 
 - **Language/stack:** Python 3.12, FastAPI, SQLAlchemy + Alembic, SQLite.
 - **UI:** server-rendered (Jinja + HTMX). No JavaScript build step.
-- **Two services in one compose file:**
+- **Three pieces in one compose file:**
   - `web`: dashboard, upload page, transaction list, review queue. Bound to the LAN only. **Not exposed to the internet.**
-  - `ingest`: a tiny listener that accepts only `POST /ingest` with a secret token header. This is the only thing exposed through Tailscale Funnel.
-- **Storage:** SQLite file on a mounted `/data` volume, with a nightly `.backup` to another folder.
+  - `ingest`: a tiny, isolated listener that accepts only `POST /ingest`, checks authentication, and drops the raw request into an inbox. It does **no parsing** and has **no access to the main database**. This is the only thing exposed through Tailscale Funnel.
+  - `worker`: reads the inbox, parses and classifies each entry, and writes provisional transactions to the main database.
+- **Storage:** SQLite file on a mounted `/data` volume, with a nightly `.backup` to another folder. The inbox lives in a separate small file or volume that the ingest container can write to and the worker can read.
 - **Timezone:** America/Toronto.
 
-### Security model for the public ingest endpoint
+## Authentication and hardening plan
 
-Tailscale Funnel makes a port reachable by anyone who has the URL, so the ingest service is locked down:
+The ingest endpoint is public (Tailscale Funnel gives it an HTTPS address that anyone with the hostname can reach). The hostname is discoverable: it appears in public certificate logs, and scanner probes were already seen minutes after the first test. So the design assumes the URL is known and relies on the token, not on obscurity.
 
-- Single route (`POST /ingest`), nothing else answers.
-- Long random secret in a request header; reject everything without it.
-- Strict JSON validation, request size limit, and rate limiting.
-- Responses contain no data.
-- Everything received is **provisional** and is not trusted until it matches a row in a CSV import. Unmatched provisional rows are flagged for review.
-- The web UI is never behind Funnel.
+### What is exposed and what can go wrong
+
+- **Exposed:** one write-only route. No pages, no GET routes, no stored data to read. The web UI, database, and other CasaOS apps are not reachable through Funnel.
+- **Fake purchases:** needs the token. Anything received is provisional and flagged until matched to a CSV row, so the impact is junk rows.
+- **Flooding:** a token does not stop requests from arriving, only from succeeding. Mitigated with rate limits, resource caps, and a circuit breaker (below). Worst case is a slow ingest service and some missed real-time captures, which the CSV import recovers.
+- **A bug in the ingest code:** the one real risk of any internet-facing service. Mitigated by keeping the service tiny, isolating it, and keeping parsing out of it.
+- **Token leak:** via a shared shortcut, a committed `.env`, or a screenshot. Mitigated by rotation (below).
+
+### Authentication layers
+
+1. **Header token.** A long random secret (32+ bytes, generated with `secrets.token_urlsafe(32)`) sent in the `X-Ingest-Token` header, never in the URL. URLs end up in logs and browser history; headers usually do not.
+2. **Constant-time comparison.** Compare with `hmac.compare_digest`. Reject with the same empty 404 whether the path or the token is wrong.
+3. **Check before reading.** Validate the token, headers, and declared body size *before* reading or parsing the body.
+4. **Replay protection.** Require `X-Ingest-Timestamp` (reject if more than about 5 minutes off the server clock) and a unique `X-Ingest-Nonce` (reject any nonce already seen in that window). A captured request then cannot be replayed. *Needs testing:* confirm Shortcuts can send a current-date header and a random nonce. If Shortcuts can compute an HMAC, a signed request is an optional upgrade, but this has not been verified.
+5. **Token rotation.** The service accepts two tokens at once, `INGEST_TOKEN` (current) and `INGEST_TOKEN_PREVIOUS` (optional, only during a rotation). Rotation procedure: generate a new token, move the old one to `INGEST_TOKEN_PREVIOUS`, put the new one in `INGEST_TOKEN`, restart, update the shortcut, then clear `INGEST_TOKEN_PREVIOUS`. Rotate immediately if a leak is suspected.
+6. **Optional secret path segment.** `INGEST_PATH_SECRET` makes the route `/ingest/<value>`. This only reduces scanner noise and is weaker than the header token, since paths show up in more places. Treat it as a bonus, not a defense.
+
+### Limiting what a flood or a bug can do
+
+- **Dumb inbox design.** The ingest service only authenticates, enforces size limits, and stores the raw request. A separate worker parses it. A parsing bug cannot be reached from the internet.
+- **Hardened container.** Non-root user, read-only root filesystem, all Linux capabilities dropped, `no-new-privileges`, a process-count limit, no Docker socket, and write access only to the inbox. No access to the main database.
+- **Resource limits.** CPU and memory limits on the ingest container so a flood cannot starve the rest of the ZimaBlade.
+- **Request limits.** Tiny body-size cap (see `config.toml`), request and connection timeouts (to handle slow or half-open connections), and a cap on concurrent connections.
+- **Rate limiting.** Applied before any other work, with a tight separate budget for failed authentication attempts. Per-client limits only work if Funnel passes the real client IP to the service. The test server log only showed `127.0.0.1`, so this is **unverified**; check which forwarding headers Funnel sends and fall back to global limits if there are none.
+- **Circuit breaker.** If rejected requests spike past a threshold, the service returns an immediate empty 404 for everything until traffic calms down. Failing closed costs little because the CSV import is the backstop.
+- **Kill switch.** `sudo tailscale funnel reset` turns the public address off instantly.
+
+### Data minimization and visibility
+
+- The shortcut sends only what the app needs: merchant, amount, and date. Do not send card digits or other fields from the notification.
+- Log rejected requests (path, status, timing) but **never request bodies**.
+- Dashboard shows "last ingest received" and "rejected requests in the last 24 hours", so probing or an outage is visible.
+- Funnel traffic passes through Tailscale's infrastructure, so assume the notification text is visible there in some form, and keep the payload minimal.
+
+### Housekeeping
+
+- Secrets live only in `.env` and the iPhone shortcut. Never share the shortcut or its iCloud link (it contains the hostname and token), and never screenshot them.
+- Pin dependencies, rebuild the image regularly, and scan it for vulnerabilities in CI (for example with Trivy).
+- Turn on automatic security updates on the ZimaBlade.
+- Only the ingest port is ever pointed at by Funnel. Never the web UI port.
+- Optional: rename the machine in Tailscale so the public hostname does not advertise "casaos".
+
+### Considered and not used
+
+- **IP allowlisting:** cellular addresses change constantly and Funnel may hide the source address anyway.
+- **Client certificates:** no practical way to use them from Shortcuts (not confirmed).
+- **Stacking more secrets** (extra paths, extra headers): little gain over one strong token.
 
 ## Data model (draft)
 
@@ -73,6 +122,7 @@ All money is stored as integer cents.
 - `merchant_rules`: pattern, category, priority (editable in the UI, not hardcoded)
 - `gas_prices`: date, region/station, grade, price_per_litre_cents, source
 - `parse_failures`: source, raw_text, error, created_at
+- `ingest_inbox` (separate store, written by `ingest`, read by `worker`): id, received_at, raw_body, processed (bool), error
 
 ## TD CSV formats
 
@@ -142,20 +192,22 @@ Each step produces something testable. The CSV-only tracker is usable after Step
 
 ### Phase B: real-time capture
 
-7. [ ] **Ingest service:** separate listener, `POST /ingest` only, secret token, validation, rate limiting, notification parsing, provisional rows. *Done when:* a request from outside your home network creates a provisional row.
+7. [ ] **Ingest service and worker:** implement the [authentication and hardening plan](#authentication-and-hardening-plan): `POST /ingest` only, header token with constant-time check, timestamp and nonce replay protection, two-token rotation, size and rate limits, circuit breaker, hardened and resource-limited container, raw-request inbox, and a separate worker that parses notifications into provisional rows. *Done when:* a request from outside your home network creates a provisional row, and requests with a bad token, stale timestamp, reused nonce, or oversized body are rejected with an empty 404.
 8. [ ] **Reconciliation:** match provisional rows to CSV rows (same amount, date within a day or two, similar merchant), promote to confirmed with the posted amount, and list unmatched ones for review.
-9. [ ] **iPhone shortcut:** notification-triggered automation that POSTs to the Funnel URL, set to run without asking. *Done when:* a real fill-up appears in the app within about a minute.
+9. [ ] **iPhone shortcut:** notification-triggered automation that POSTs to the Funnel URL with the token, timestamp, and nonce headers, set to run without asking. *Done when:* a real fill-up appears in the app within about a minute.
 
 ### Phase C: prices and deployment
 
 10. [ ] **Gas prices and estimated litres:** price-source plugin, litres estimate, manual override, per-merchant adjustment.
-11. [ ] **Deployment:** compose file with both services, persistent `/data` volume, env vars for the token, healthcheck, restart policy. Import into CasaOS, point Funnel at the ingest port only, schedule nightly SQLite backups, and test a restore.
-12. [ ] **Hardening:** structured logging, "last ingest received" indicator, token rotation, parser tests for new formats, small CI pipeline (lint, tests, image build), dependency pinning.
+11. [ ] **Deployment:** compose file with the three pieces, persistent `/data` volume, env vars for the tokens, healthcheck, restart policy, container resource limits. Import into CasaOS, point Funnel at the ingest port only, schedule nightly SQLite backups, and test a restore.
+12. [ ] **Hardening:** structured logging, "last ingest received" and "rejected requests" indicators, rotation drill (practice the token rotation once), parser tests for new formats, small CI pipeline (lint, tests, image build, vulnerability scan), dependency pinning, automatic OS updates.
 
 ## Open decisions
 
 - **Step 6:** does the web UI need a login, or is LAN-only enough?
 - **Step 7:** exact notification format (depends on the Step 0 screenshot).
+- **Step 7:** can Shortcuts send a current-date header and a random nonce (needed for replay protection)? Can it compute an HMAC? Test before committing to a signed-request design.
+- **Step 7:** does Funnel forward the real client IP (for per-client rate limits)? Check the headers Funnel adds.
 - **Step 10:** start with government average prices (recommended) or look for a station-level source?
 - **Debit gas purchases:** no example seen yet. Export a range that includes one so the debit gas format can be confirmed. Until then, ship credit-first.
 
@@ -164,7 +216,7 @@ Each step produces something testable. The CSV-only tracker is usable after Step
 - **Notification trigger is best-effort.** A developer reported dropped runs for rapid-fire notifications with no error. The CSV reconciliation is the safety net.
 - **MySpend reliability.** At least one recent review says its notifications stopped sending. Test before depending on it.
 - **Bank format changes.** Parser failures go to `parse_failures` instead of being dropped, and imports can be re-run.
-- **Public endpoint.** Mitigated by the token, rate limiting, provisional-only data, and keeping the UI off Funnel.
+- **Public endpoint.** A token does not prevent flooding, only misuse. Mitigated by rate limits, resource caps, the circuit breaker, a minimal and isolated ingest service, provisional-only data, and keeping the UI off Funnel. Residual risk is a software vulnerability in the service or its dependencies.
 - **Server availability.** If the ZimaBlade is off, real-time events are lost until the next CSV import.
 
 ## Progress checklist
@@ -176,7 +228,7 @@ Each step produces something testable. The CSV-only tracker is usable after Step
 - [ ] Step 4: gas classifier
 - [ ] Step 5: import pipeline
 - [ ] Step 6: web UI v1
-- [ ] Step 7: ingest service
+- [ ] Step 7: ingest service and worker (auth and hardening)
 - [ ] Step 8: reconciliation
 - [ ] Step 9: iPhone shortcut
 - [ ] Step 10: gas prices and litres
