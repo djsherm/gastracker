@@ -1,0 +1,106 @@
+# ---------------------------------------------------------------
+# Gas Spending Tracker: PUBLIC configuration (safe to commit)
+#
+# Nothing secret belongs in this file. Secrets (ingest token,
+# public hostname, optional secret path) live in .env, which is
+# gitignored. Copy .env.example to .env to create it.
+#
+# Precedence when the app starts: environment variables override
+# values in this file.
+# ---------------------------------------------------------------
+
+[app]
+name = "Gas Spending Tracker"
+timezone = "America/Toronto"
+log_level = "INFO"            # DEBUG | INFO | WARNING | ERROR
+
+# ---------------------------------------------------------------
+# Two listeners inside the container. Only the ingest port is ever
+# exposed to the internet (via Tailscale Funnel). The web UI is for
+# the LAN only and must NEVER be put behind Funnel.
+# Host-side port mappings are set in .env (see .env.example).
+# ---------------------------------------------------------------
+[web]
+host = "0.0.0.0"              # container-internal bind address
+port = 8000
+
+[ingest]
+host = "0.0.0.0"              # container-internal bind address
+port = 8765
+token_header = "X-Ingest-Token"
+max_body_bytes = 4096         # reject anything larger
+rate_limit_per_minute = 20    # per client, applied before any parsing
+log_rejected_requests = true  # log path/status only, never the body
+
+# ---------------------------------------------------------------
+# Storage (paths are inside the container; mount a volume at /data)
+# ---------------------------------------------------------------
+[database]
+path = "/data/gas.db"
+backup_dir = "/data/backups"
+backup_keep = 14              # keep the newest N nightly backups
+
+# ---------------------------------------------------------------
+# CSV import. Neither TD export contains an account number, so the
+# upload form asks which account a file belongs to (list below).
+# ---------------------------------------------------------------
+[import]
+keep_uploaded_files = false   # parse in memory; never save the original
+keep_categories = ["gas", "needs_review"]  # everything else is discarded
+future_dated_rows = "mark_pending"         # accept, but flag as pending
+
+[[accounts]]
+id = "td_credit"
+label = "TD credit card"
+parser = "td_credit"          # MM/DD/YYYY, newest first, unquoted
+card_type = "credit"
+
+[[accounts]]
+id = "td_debit"
+label = "TD debit account"
+parser = "td_debit"           # YYYY-MM-DD, oldest first, quoted
+card_type = "debit"
+
+# ---------------------------------------------------------------
+# Gas classification. These are SEED values loaded into the
+# merchant_rules table on first run. After that, edit rules in the
+# web UI; the database is the source of truth.
+# Matching is case-insensitive substring matching.
+# ---------------------------------------------------------------
+[classifier]
+small_amount_threshold_cents = 500   # a gas-brand charge under $5 is
+                                     # probably a coffee, not a fill-up
+
+gas_patterns = [
+  "SHELL",
+  "PETRO-CANADA",
+  "PETRO CANADA",
+  "ESSO",
+  "PIONEER",
+  "ULTRAMAR",
+  "SUNOCO",
+  "COSTCO GAS",
+]
+
+# Could be gas or something else; send to the needs_review queue.
+ambiguous_patterns = [
+  "COSTCO",
+  "CANADIAN TIRE",
+  "CIRCLE K",
+  "7-ELEVEN",
+]
+
+# ---------------------------------------------------------------
+# Matching real-time (provisional) events to CSV rows
+# ---------------------------------------------------------------
+[reconciliation]
+date_window_days = 3          # CSV date may trail the purchase date
+amount_tolerance_cents = 0    # raise if pump pre-authorization holds
+                              # produce mismatched amounts
+
+# ---------------------------------------------------------------
+# Gas prices (used to estimate litres = amount / price per litre)
+# ---------------------------------------------------------------
+[prices]
+source = "manual"             # "manual" for now; government averages later
+region = "Ontario"

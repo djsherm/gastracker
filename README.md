@@ -127,7 +127,7 @@ Each step produces something testable. The CSV-only tracker is usable after Step
 
 ### Step 0: checks (no code)
 
-1. [ ] Create a free Tailscale account, install it on the ZimaBlade, and enable Funnel in the admin console.
+1. [X] Create a free Tailscale account, install it on the ZimaBlade, and enable Funnel in the admin console.
 2. [ ] Turn on MySpend transaction notifications. Build a test Shortcuts automation (notification trigger that appends Title, Body, and Date to a note) and capture what a real fill-up notification looks like.
 3. [ ] Export fresh TD CSVs (credit and debit) as format references.
 

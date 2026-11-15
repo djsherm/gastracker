@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------
+# Secrets and local configuration: NEVER commit these
+# ---------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# ---------------------------------------------------------------
+# Financial data: real bank exports and the database
+# ---------------------------------------------------------------
+# Real TD exports must never be committed. Only synthetic test
+# fixtures named synthetic_*.csv are allowed (see the last rule).
+*.csv
+!tests/fixtures/synthetic_*.csv
+uploads/
+
+# Database files, journals, and backups
+data/
+backups/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# ---------------------------------------------------------------
+# Docker
+# ---------------------------------------------------------------
+docker-compose.override.yml
+compose.override.yml
+
+# ---------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# ---------------------------------------------------------------
+# Editors and OS
+# ---------------------------------------------------------------
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
