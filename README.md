@@ -127,30 +127,30 @@ Each step produces something testable. The CSV-only tracker is usable after Step
 
 ### Step 0: checks (no code)
 
-1. Create a free Tailscale account, install it on the ZimaBlade, and enable Funnel in the admin console.
-2. Turn on MySpend transaction notifications. Build a test Shortcuts automation (notification trigger that appends Title, Body, and Date to a note) and capture what a real fill-up notification looks like.
-3. Export fresh TD CSVs (credit and debit) as format references.
+1. [ ] Create a free Tailscale account, install it on the ZimaBlade, and enable Funnel in the admin console.
+2. [ ] Turn on MySpend transaction notifications. Build a test Shortcuts automation (notification trigger that appends Title, Body, and Date to a note) and capture what a real fill-up notification looks like.
+3. [ ] Export fresh TD CSVs (credit and debit) as format references.
 
 ### Phase A: CSV-first tracker
 
-1. **Project scaffold:** Python 3.12, FastAPI, SQLAlchemy + Alembic, pytest, linter, Dockerfile from day one, timezone set.
-2. **Database schema and migrations.** *Done when:* migrations run on an empty database.
-3. **TD CSV parsers:** `td_credit` and `td_debit` profiles, dedupe key, balance check, synthetic test fixtures. *Done when:* both formats parse correctly and overlapping imports create no duplicates.
-4. **Gas classifier:** rules table, three outcomes, small-amount check.
-5. **Import pipeline:** upload, parse in memory, classify, store only gas and needs-review rows, discard the file.
-6. **Web UI v1:** CSV upload with account dropdown, transaction list with edit, needs-review queue, parse-failure list, manual add, basic dashboard (monthly spend, fill-up count, average per fill-up), "last import" indicator with a suggested start date for the next export. *Done when:* you can upload a CSV and see your gas history.
+1. [ ] **Project scaffold:** Python 3.12, FastAPI, SQLAlchemy + Alembic, pytest, linter, Dockerfile from day one, timezone set.
+2. [ ] **Database schema and migrations.** *Done when:* migrations run on an empty database.
+3. [ ] **TD CSV parsers:** `td_credit` and `td_debit` profiles, dedupe key, balance check, synthetic test fixtures. *Done when:* both formats parse correctly and overlapping imports create no duplicates.
+4. [ ] **Gas classifier:** rules table, three outcomes, small-amount check.
+5. [ ] **Import pipeline:** upload, parse in memory, classify, store only gas and needs-review rows, discard the file.
+6. [ ] **Web UI v1:** CSV upload with account dropdown, transaction list with edit, needs-review queue, parse-failure list, manual add, basic dashboard (monthly spend, fill-up count, average per fill-up), "last import" indicator with a suggested start date for the next export. *Done when:* you can upload a CSV and see your gas history.
 
 ### Phase B: real-time capture
 
-7. **Ingest service:** separate listener, `POST /ingest` only, secret token, validation, rate limiting, notification parsing, provisional rows. *Done when:* a request from outside your home network creates a provisional row.
-8. **Reconciliation:** match provisional rows to CSV rows (same amount, date within a day or two, similar merchant), promote to confirmed with the posted amount, and list unmatched ones for review.
-9. **iPhone shortcut:** notification-triggered automation that POSTs to the Funnel URL, set to run without asking. *Done when:* a real fill-up appears in the app within about a minute.
+7. [ ] **Ingest service:** separate listener, `POST /ingest` only, secret token, validation, rate limiting, notification parsing, provisional rows. *Done when:* a request from outside your home network creates a provisional row.
+8. [ ] **Reconciliation:** match provisional rows to CSV rows (same amount, date within a day or two, similar merchant), promote to confirmed with the posted amount, and list unmatched ones for review.
+9. [ ] **iPhone shortcut:** notification-triggered automation that POSTs to the Funnel URL, set to run without asking. *Done when:* a real fill-up appears in the app within about a minute.
 
 ### Phase C: prices and deployment
 
-10. **Gas prices and estimated litres:** price-source plugin, litres estimate, manual override, per-merchant adjustment.
-11. **Deployment:** compose file with both services, persistent `/data` volume, env vars for the token, healthcheck, restart policy. Import into CasaOS, point Funnel at the ingest port only, schedule nightly SQLite backups, and test a restore.
-12. **Hardening:** structured logging, "last ingest received" indicator, token rotation, parser tests for new formats, small CI pipeline (lint, tests, image build), dependency pinning.
+10. [ ] **Gas prices and estimated litres:** price-source plugin, litres estimate, manual override, per-merchant adjustment.
+11. [ ] **Deployment:** compose file with both services, persistent `/data` volume, env vars for the token, healthcheck, restart policy. Import into CasaOS, point Funnel at the ingest port only, schedule nightly SQLite backups, and test a restore.
+12. [ ] **Hardening:** structured logging, "last ingest received" indicator, token rotation, parser tests for new formats, small CI pipeline (lint, tests, image build), dependency pinning.
 
 ## Open decisions
 
