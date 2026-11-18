@@ -1,4 +1,19 @@
-# ---------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.csv
+*.db
+*.db-*
+*.sqlite*
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+data/# ---------------------------------------------------------------
 # Secrets and local configuration: NEVER commit these
 # ---------------------------------------------------------------
 .env

@@ -1,4 +1,20 @@
-# Keep secrets, data, and clutter out of the Docker image.
+.git
+.venv
+.pytest_cache
+.ruff_cache
+__pycache__
+**/__pycache__
+*.egg-info
+build
+dist
+.env
+.env.*
+**/*.csv
+**/*.db
+**/*.db-*
+**/*.sqlite*
+data
+tests# Keep secrets, data, and clutter out of the Docker image.
 # Secrets are passed at runtime via env_file / environment, never baked in.
 .env
 .env.*

@@ -1,0 +1,1 @@
+"""Gas spending tracker."""

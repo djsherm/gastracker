@@ -2,7 +2,129 @@
 
 A self-hosted, single-user web app that tracks how much you spend on gas, estimates the litres you bought, and runs in Docker on a ZimaBlade with CasaOS.
 
-> **Status:** planning. Nothing is built yet. See [Development steps](#development-steps) for the build order and the checklist at the bottom for progress.
+> **Status:** Step 1 scaffold is implemented. Domain tables, CSV import, and the dashboard are not built yet. See [Development steps](#development-steps) for the build order.
+
+## Run the scaffold
+
+Run these commands from the repository root. Use Python 3.12 (the Docker image uses 3.12; newer Python versions are also accepted by the package).
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
+cp .env.example .env
+set -a
+source .env
+set +a
+python -m gastracker
+```
+
+Open http://127.0.0.1:8000/docs for the scaffold's API documentation, or test it from a second terminal:
+
+```bash
+curl --fail http://127.0.0.1:8000/health
+```
+
+Expected response: `{"status":"ok","timezone":"America/Toronto"}`. The root URL `/` returns 404 until the web UI is implemented in Step 6. Stop the server with Ctrl+C.
+
+The app loads public settings from `config.toml` (relative to the current directory). `GASTRACKER_CONFIG` selects another file. Environment variables `APP_NAME`, `APP_TIMEZONE`, `APP_LOG_LEVEL`, `DATABASE_PATH`, `WEB_HOST`, and `WEB_PORT` override the corresponding TOML values. `.env` is not loaded automatically; the shell commands above export it. The example uses a local `./data/gas.db` rather than the container-only `/data/gas.db`. Application dates should use the configured `ZoneInfo` timezone, including Toronto daylight-saving changes.
+
+### Automated checks
+
+With the virtual environment active:
+
+```bash
+python -m pytest -q
+ruff check .
+ruff format --check .
+DATABASE_PATH=./data/gas.db alembic upgrade head
+DATABASE_PATH=./data/gas.db alembic check
+```
+
+The tests cover the health endpoint, environment overrides, timezone validation and daylight saving, SQLite connectivity, and Alembic startup. Alembic currently has no revisions or domain tables; `upgrade head` only validates the migration wiring, and `check` should report no new upgrade operations. The first schema migration belongs to Step 2.
+
+### Docker setup on Arch Linux (once per machine)
+
+Docker must be installed on the host; the project's Dockerfile does not install Docker itself. These are the setup steps used on the Arch Linux development machine:
+
+```bash
+sudo pacman -Syu docker docker-buildx
+sudo systemctl enable --now docker.service
+sudo docker version
+sudo docker buildx version
+sudo docker info
+```
+
+`enable --now` starts the daemon immediately and enables it at boot. Buildx provides the current BuildKit image builder and avoids the legacy-builder deprecation warning. The commands below use `sudo` because Docker socket access requires elevated privileges with this setup; adding yourself to the `docker` group is not necessary and would grant effectively root-level access.
+
+### Build the image
+
+From the repository root:
+
+```bash
+sudo docker buildx build --load --progress=plain -t gastracker:dev .
+```
+
+This builds the application into an image named `gastracker:dev` and loads it into the local Docker engine. The first build downloads Python 3.12 and the Python dependencies; later builds reuse cached layers. `--progress=plain` shows which operation is running. Wait for a successful finish before running the container. A host Python installation or virtual environment is not needed for this Docker path.
+
+### Run and test the container
+
+```bash
+sudo docker run --rm --name gastracker \
+  -p 127.0.0.1:8001:8000 \
+  -v gastracker-data:/data \
+  gastracker:dev
+```
+
+`docker run` creates and starts a container from the image. Keep this terminal open while testing. Host port **8001** is used because the local Python server already occupied port 8000 during setup; the container still listens on port 8000 internally. The named volume `gastracker-data` is created automatically on first use and retains `/data` across container runs. The image runs the application as a non-root user even though the host Docker command uses `sudo`.
+
+From a second terminal:
+
+```bash
+curl --fail http://127.0.0.1:8001/health
+sudo docker ps --filter name=gastracker
+sudo docker inspect --format '{{.State.Health.Status}}' gastracker
+```
+
+The health endpoint should return `{"status":"ok","timezone":"America/Toronto"}`. The container healthcheck runs every 30 seconds, so its status can initially be `starting`. API documentation is at http://127.0.0.1:8001/docs. The root URL http://127.0.0.1:8001/ currently returns `{"detail":"Not Found"}` because no homepage has been implemented; this is not a Docker failure.
+
+The port is published on loopback only for this smoke test. Never point Tailscale Funnel at this web service. Compose, LAN deployment, and the isolated ingest/worker containers belong to later steps.
+
+### Stop the servers
+
+Stop the container from a second terminal:
+
+```bash
+sudo docker stop gastracker
+```
+
+Because it was started with `--rm`, Docker removes the stopped container, but keeps the image and the named data volume. Start it again with the same `docker run` command, not `docker start`. This test container does not restart automatically after a reboot. To stop a separate local Python server, press Ctrl+C in the terminal running `python -m gastracker` (or terminate the VS Code run task).
+
+### When to repeat each step
+
+| Change or event | What to repeat |
+|---|---|
+| Normal development session, no file changes | Run the existing image with `docker run`; no build or installation needed. |
+| Application code, templates, dependency declarations, Dockerfile, migrations, or `config.toml` changes | Rebuild the image, stop the old container, and run a new one. These files are copied into the image; this setup has no live reload or source bind mount. Rebuilding does not update an already-running container. |
+| Host port, volume mapping, or environment variable changes | Stop and recreate the container with updated `docker run` arguments; no image rebuild needed. Pass environment overrides with `-e NAME=value`. The current run command does not automatically load the host `.env`. |
+| Machine reboot | The enabled Docker service starts automatically. Run the container again when needed. |
+| New development machine | Install Docker and Buildx, enable the service, then build and run. |
+| Base-image or dependency security refresh | Rebuild periodically, for example monthly and promptly after relevant security advisories, using the command below; then stop and recreate the container. |
+
+```bash
+sudo docker buildx build --load --pull --no-cache --progress=plain -t gastracker:dev .
+```
+
+`--pull` refreshes the Python base image and `--no-cache` reruns dependency installation. Normal builds can omit both flags. Dependencies currently use version ranges rather than a lockfile, so fresh dependency resolution can select newer compatible releases; run the tests after updating. Once schema migrations exist, a rebuild alone will not apply them; follow the migration instructions introduced with Step 2. Stopping, removing, or rebuilding the container does not delete `gastracker-data`. Do not remove that volume unless you intend to delete its stored data.
+
+### Setup troubleshooting
+
+- `docker: command not found`: install Docker using the Arch setup commands above.
+- Legacy-builder warning or missing `docker buildx`: install `docker-buildx`.
+- Cannot connect to the Docker daemon: check `systemctl is-active docker.service` and start it with `sudo systemctl start docker.service` if inactive.
+- Permission denied accessing the Docker socket: use `sudo docker ...` with this setup.
+- `address already in use`: stop the process using the host port, or change only the host side of the mapping, for example `-p 127.0.0.1:8002:8000`, and browse port 8002.
+- A pasted command starts with `^[[200~` or ends with an unexpected `~`: cancel with Ctrl+C and enter the clean command again; those are not part of Docker's syntax.
 
 ## Goals
 
@@ -179,11 +301,11 @@ Each step produces something testable. The CSV-only tracker is usable after Step
 
 1. [X] Create a free Tailscale account, install it on the ZimaBlade, and enable Funnel in the admin console.
 2. [ ] Turn on MySpend transaction notifications. Build a test Shortcuts automation (notification trigger that appends Title, Body, and Date to a note) and capture what a real fill-up notification looks like.
-3. [ ] Export fresh TD CSVs (credit and debit) as format references.
+3. [X] Export fresh TD CSVs (credit and debit) as format references.
 
 ### Phase A: CSV-first tracker
 
-1. [ ] **Project scaffold:** Python 3.12, FastAPI, SQLAlchemy + Alembic, pytest, linter, Dockerfile from day one, timezone set.
+1. [X] **Project scaffold:** Python 3.12, FastAPI, SQLAlchemy + Alembic, pytest, linter, Dockerfile from day one, timezone set.
 2. [ ] **Database schema and migrations.** *Done when:* migrations run on an empty database.
 3. [ ] **TD CSV parsers:** `td_credit` and `td_debit` profiles, dedupe key, balance check, synthetic test fixtures. *Done when:* both formats parse correctly and overlapping imports create no duplicates.
 4. [ ] **Gas classifier:** rules table, three outcomes, small-amount check.
@@ -222,7 +344,7 @@ Each step produces something testable. The CSV-only tracker is usable after Step
 ## Progress checklist
 
 - [ ] Step 0: Tailscale + Funnel, test notification automation, fresh CSV exports
-- [ ] Step 1: scaffold and Docker
+- [X] Step 1: scaffold and Docker
 - [ ] Step 2: schema and migrations
 - [ ] Step 3: TD CSV parsers
 - [ ] Step 4: gas classifier
