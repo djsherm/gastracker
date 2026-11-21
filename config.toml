@@ -31,6 +31,15 @@ token_header = "X-Ingest-Token"
 max_body_bytes = 4096         # reject anything larger
 rate_limit_per_minute = 20    # per client, applied before any parsing
 log_rejected_requests = true  # log path/status only, never the body
+replay_protection = true
+timestamp_window_seconds = 300
+nonce_retention_seconds = 600
+failed_auth_limit_per_minute = 5
+max_concurrent_connections = 16
+request_timeout_seconds = 10
+circuit_breaker_rejection_threshold = 30
+circuit_breaker_window_seconds = 60
+circuit_breaker_cooldown_seconds = 120
 
 # ---------------------------------------------------------------
 # Storage (paths are inside the container; mount a volume at /data)
@@ -40,32 +49,25 @@ path = "/data/gas.db"
 backup_dir = "/data/backups"
 backup_keep = 14              # keep the newest N nightly backups
 
+[inbox]
+path = "/data/inbox.db"
+
 # ---------------------------------------------------------------
-# CSV import. Neither TD export contains an account number, so the
-# upload form asks which account a file belongs to (list below).
+# CSV import is optional and reserved for backfill/audit work. The
+# core flow does not depend on uploads or account identification.
 # ---------------------------------------------------------------
 [import]
 keep_uploaded_files = false   # parse in memory; never save the original
 keep_categories = ["gas", "needs_review"]  # everything else is discarded
 future_dated_rows = "mark_pending"         # accept, but flag as pending
 
-[[accounts]]
-id = "td_credit"
-label = "TD credit card"
-parser = "td_credit"          # MM/DD/YYYY, newest first, unquoted
-card_type = "credit"
-
-[[accounts]]
-id = "td_debit"
-label = "TD debit account"
-parser = "td_debit"           # YYYY-MM-DD, oldest first, quoted
-card_type = "debit"
-
 # ---------------------------------------------------------------
 # Gas classification. These are SEED values loaded into the
 # merchant_rules table on first run. After that, edit rules in the
 # web UI; the database is the source of truth.
-# Matching is case-insensitive substring matching.
+# Rules are seeded on first run; the database becomes authoritative.
+# Merchant matching normalizes text and permits prefix matching for
+# TD-truncated merchant names.
 # ---------------------------------------------------------------
 [classifier]
 small_amount_threshold_cents = 500   # a gas-brand charge under $5 is
@@ -90,13 +92,22 @@ ambiguous_patterns = [
   "7-ELEVEN",
 ]
 
-# ---------------------------------------------------------------
-# Matching real-time (provisional) events to CSV rows
-# ---------------------------------------------------------------
-[reconciliation]
-date_window_days = 3          # CSV date may trail the purchase date
-amount_tolerance_cents = 0    # raise if pump pre-authorization holds
-                              # produce mismatched amounts
+not_gas_patterns = [
+  "PARKING",
+  "TRANSIT",
+  "UBER",
+  "LYFT",
+  "TAXI",
+]
+
+# Pay-at-pump pre-authorizations and their releases are resolved from
+# notifications only. Amount matching is exact; do not add a tolerance.
+[holds]
+settle_minutes = 15
+sibling_window_minutes = 60
+hold_void_lookback_hours = 192
+credit_match_grace_minutes = 10
+hold_expiry_days = 8
 
 # ---------------------------------------------------------------
 # Gas prices (used to estimate litres = amount / price per litre)
@@ -104,3 +115,9 @@ amount_tolerance_cents = 0    # raise if pump pre-authorization holds
 [prices]
 source = "manual"             # "manual" for now; government averages later
 region = "Ontario"
+grade = "regular"
+
+[worker]
+poll_interval_seconds = 2
+inbox_retention_days = 30
+parse_failure_retention_days = 30
